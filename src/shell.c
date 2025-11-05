@@ -1,62 +1,74 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
 #include "shell.h"
 
-char* read_cmd(char* prompt, FILE* fp) {
-    printf("%s", prompt);
-    char* cmdline = (char*) malloc(sizeof(char) * MAX_LEN);
-    int c, pos = 0;
+#define MAX_INPUT_SIZE 1024
+#define MAX_TOKENS 64
+#define TOKEN_DELIM " \t\r\n\a"
 
-    while ((c = getc(fp)) != EOF) {
-        if (c == '\n') break;
-        cmdline[pos++] = c;
-    }
-
-    if (c == EOF && pos == 0) {
-        free(cmdline);
-        return NULL; // Handle Ctrl+D
-    }
-    
-    cmdline[pos] = '\0';
-    return cmdline;
+// Read a line of input from stdin
+char *read_line(void) {
+    char *line = NULL;
+    size_t bufsize = 0; // getline allocates buffer automatically
+    getline(&line, &bufsize, stdin);
+    return line;
 }
 
-char** tokenize(char* cmdline) {
-    // Edge case: empty command line
-    if (cmdline == NULL || cmdline[0] == '\0' || cmdline[0] == '\n') {
-        return NULL;
+// Split line into tokens (arguments)
+char **parse_line(char *line) {
+    int bufsize = MAX_TOKENS, position = 0;
+    char **tokens = malloc(bufsize * sizeof(char*));
+    char *token;
+
+    if (!tokens) {
+        fprintf(stderr, "myshell: allocation error\n");
+        exit(EXIT_FAILURE);
     }
 
-    char** arglist = (char**)malloc(sizeof(char*) * (MAXARGS + 1));
-    for (int i = 0; i < MAXARGS + 1; i++) {
-        arglist[i] = (char*)malloc(sizeof(char) * ARGLEN);
-        bzero(arglist[i], ARGLEN);
+    token = strtok(line, TOKEN_DELIM);
+    while (token != NULL) {
+        tokens[position++] = token;
+        token = strtok(NULL, TOKEN_DELIM);
+    }
+    tokens[position] = NULL;
+    return tokens;
+}
+
+// Handle built-in commands
+int handle_builtin(char **args) {
+    if (args[0] == NULL) return 1; // No command entered
+
+    if (strcmp(args[0], "exit") == 0) {
+        printf("Exiting myshell...\n");
+        exit(0);
     }
 
-    char* cp = cmdline;
-    char* start;
-    int len;
-    int argnum = 0;
-
-    while (*cp != '\0' && argnum < MAXARGS) {
-        while (*cp == ' ' || *cp == '\t') cp++; // Skip leading whitespace
-        
-        if (*cp == '\0') break; // Line was only whitespace
-
-        start = cp;
-        len = 1;
-        while (*++cp != '\0' && !(*cp == ' ' || *cp == '\t')) {
-            len++;
+    else if (strcmp(args[0], "cd") == 0) {
+        if (args[1] == NULL) {
+            fprintf(stderr, "myshell: expected argument to \"cd\"\n");
+        } else {
+            if (chdir(args[1]) != 0) {
+                perror("myshell");
+            }
         }
-        strncpy(arglist[argnum], start, len);
-        arglist[argnum][len] = '\0';
-        argnum++;
+        return 1;
     }
 
-    if (argnum == 0) { // No arguments were parsed
-        for(int i = 0; i < MAXARGS + 1; i++) free(arglist[i]);
-        free(arglist);
-        return NULL;
+    else if (strcmp(args[0], "help") == 0) {
+        printf("MyShell Built-in Commands:\n");
+        printf("  cd <dir>   - Change current directory\n");
+        printf("  help       - Display this help message\n");
+        printf("  exit       - Exit the shell\n");
+        printf("  jobs       - Placeholder (not yet implemented)\n");
+        return 1;
     }
 
-    arglist[argnum] = NULL;
-    return arglist;
+    else if (strcmp(args[0], "jobs") == 0) {
+        printf("Job control not yet implemented.\n");
+        return 1;
+    }
+
+    return 0; // Not a built-in
 }
