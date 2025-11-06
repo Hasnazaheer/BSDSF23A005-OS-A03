@@ -1,46 +1,35 @@
 #include "shell.h"
 
-int execute_pipeline(Command *cmds, int n) {
-    if (n <= 0) return 1;
+int execute_command(char *line) {
+    if (line == NULL || strlen(line) == 0)
+        return 0;
 
-    int (*pipes)[2] = NULL;
-    if (n > 1) {
-        pipes = malloc((n - 1) * sizeof(int[2]));
-        for (int i = 0; i < n - 1; ++i) pipe(pipes[i]);
+    // Split command into args
+    char *args[64];
+    int argc = 0;
+
+    char *token = strtok(line, " ");
+    while (token != NULL && argc < 63) {
+        args[argc++] = token;
+        token = strtok(NULL, " ");
+    }
+    args[argc] = NULL;
+
+    if (args[0] == NULL)
+        return 0;
+
+    pid_t pid = fork();
+
+    if (pid == 0) {
+        execvp(args[0], args);
+        perror("Command failed");
+        exit(EXIT_FAILURE);
+    } else if (pid > 0) {
+        int status;
+        waitpid(pid, &status, 0);
+    } else {
+        perror("Fork failed");
     }
 
-    pid_t *pids = malloc(n * sizeof(pid_t));
-
-    for (int i = 0; i < n; ++i) {
-        pid_t pid = fork();
-        if (pid == 0) {
-            if (i > 0) dup2(pipes[i - 1][0], STDIN_FILENO);
-            if (i < n - 1) dup2(pipes[i][1], STDOUT_FILENO);
-
-            if (pipes) {
-                for (int k = 0; k < n - 1; ++k) {
-                    close(pipes[k][0]);
-                    close(pipes[k][1]);
-                }
-            }
-
-            execvp(cmds[i].args[0], cmds[i].args);
-            fprintf(stderr, "myshell: %s: %s\n", cmds[i].args[0], strerror(errno));
-            exit(EXIT_FAILURE);
-        } else {
-            pids[i] = pid;
-        }
-    }
-
-    if (pipes) {
-        for (int k = 0; k < n - 1; ++k) {
-            close(pipes[k][0]);
-            close(pipes[k][1]);
-        }
-        free(pipes);
-    }
-
-    for (int i = 0; i < n; ++i) waitpid(pids[i], NULL, 0);
-    free(pids);
-    return 1;
+    return 0;
 }

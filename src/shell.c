@@ -1,148 +1,96 @@
 #include "shell.h"
 
-static Job jobs[MAX_JOBS];
-static int job_count = 0;
+#define MAX_VARS 100
 
+typedef struct {
+    char name[64];
+    char value[256];
+} Variable;
+
+static Variable vars[MAX_VARS];
+static int var_count = 0;
+
+// ---------- Initialization ----------
 void init_shell() {
-    using_history();
-    printf("Welcome to myshell (v7: if-then-else)\n");
+    printf("\nWelcome to My Custom Shell (Feature 8: Variables)\n");
+    printf("Type 'set' to view variables or 'exit' to quit.\n\n");
 }
 
-void add_job(pid_t pid, const char *cmd) {
-    if (job_count < MAX_JOBS) {
-        jobs[job_count].pid = pid;
-        strcpy(jobs[job_count].cmdline, cmd);
-        jobs[job_count].running = 1;
-        job_count++;
+// ---------- Utility ----------
+void trim(char *str) {
+    char *end;
+    while (isspace((unsigned char)*str)) str++;
+    if (*str == 0) return;
+    end = str + strlen(str) - 1;
+    while (end > str && isspace((unsigned char)*end)) end--;
+    *(end + 1) = '\0';
+}
+
+// ---------- Variable Handling ----------
+void set_variable(const char *name, const char *value) {
+    for (int i = 0; i < var_count; i++) {
+        if (strcmp(vars[i].name, name) == 0) {
+            strncpy(vars[i].value, value, sizeof(vars[i].value));
+            return;
+        }
     }
+    if (var_count < MAX_VARS) {
+        strncpy(vars[var_count].name, name, sizeof(vars[var_count].name));
+        strncpy(vars[var_count].value, value, sizeof(vars[var_count].value));
+        var_count++;
+    } else {
+        fprintf(stderr, "Variable limit reached.\n");
+    }
+}
+
+const char *get_variable(const char *name) {
+    for (int i = 0; i < var_count; i++) {
+        if (strcmp(vars[i].name, name) == 0) {
+            return vars[i].value;
+        }
+    }
+    return "";
+}
+
+void print_all_variables() {
+    printf("\n--- Stored Variables ---\n");
+    for (int i = 0; i < var_count; i++) {
+        printf("%s = %s\n", vars[i].name, vars[i].value);
+    }
+    if (var_count == 0) printf("(No variables set)\n");
+    printf("------------------------\n");
+}
+
+char *expand_vars_in_string(const char *input) {
+    static char expanded[1024];
+    expanded[0] = '\0';
+
+    const char *p = input;
+    while (*p) {
+        if (*p == '$') {
+            p++;
+            char varname[64] = {0};
+            int i = 0;
+            while (*p && (isalnum(*p) || *p == '_') && i < 63) {
+                varname[i++] = *p++;
+            }
+            const char *val = get_variable(varname);
+            strcat(expanded, val);
+        } else {
+            int len = strlen(expanded);
+            expanded[len] = *p;
+            expanded[len + 1] = '\0';
+            p++;
+        }
+    }
+    return strdup(expanded);
 }
 
 void reap_background_jobs() {
-    int status;
-    for (int i = 0; i < job_count; ++i) {
-        if (jobs[i].running) {
-            pid_t result = waitpid(jobs[i].pid, &status, WNOHANG);
-            if (result > 0) {
-                jobs[i].running = 0;
-                printf("[Done] %s (PID=%d)\n", jobs[i].cmdline, jobs[i].pid);
-            }
-        }
-    }
+    // Optional future feature
 }
 
-void list_jobs() {
-    for (int i = 0; i < job_count; ++i) {
-        if (jobs[i].running)
-            printf("[%d] Running: %s\n", jobs[i].pid, jobs[i].cmdline);
-    }
-}
-
-void trim(char *str) {
-    char *end;
-    while (*str == ' ' || *str == '\t') str++;
-    end = str + strlen(str) - 1;
-    while (end > str && (*end == ' ' || *end == '\t')) *end-- = '\0';
-}
-
-/* ---------- execute_command() -------------- */
-int execute_command(char *line) {
-    char *commands[MAX_CMDS];
-    int cmd_count = 0;
-    char *token = strtok(line, ";");
-
-    while (token && cmd_count < MAX_CMDS) {
-        commands[cmd_count++] = token;
-        token = strtok(NULL, ";");
-    }
-
-    for (int i = 0; i < cmd_count; i++) {
-        char *cmd = commands[i];
-        trim(cmd);
-
-        if (strlen(cmd) == 0) continue;
-
-        /* background execution */
-        int background = 0;
-        if (cmd[strlen(cmd)-1] == '&') {
-            background = 1;
-            cmd[strlen(cmd)-1] = '\0';
-            trim(cmd);
-        }
-
-        pid_t pid = fork();
-        if (pid == 0) {
-            /* Child */
-            execl("/bin/sh", "sh", "-c", cmd, NULL);
-            perror("exec");
-            exit(EXIT_FAILURE);
-        } else if (pid > 0) {
-            if (background) {
-                add_job(pid, cmd);
-            } else {
-                int status;
-                waitpid(pid, &status, 0);
-            }
-        } else {
-            perror("fork");
-        }
-    }
-    return 1;
-}
-
-/* ---------- handle_if_block() -------------- */
-int handle_if_block(const char *first_line) {
-    char *if_cmd = strdup(first_line + 2);
-    trim(if_cmd);
-
-    char *then_cmds[100], *else_cmds[100];
-    int then_count = 0, else_count = 0;
-    int in_then = 0, in_else = 0;
-
-    char *line;
-    while ((line = readline("> ")) != NULL) {
-        trim(line);
-
-        if (strcmp(line, "then") == 0) {
-            in_then = 1;
-        } else if (strcmp(line, "else") == 0) {
-            in_then = 0;
-            in_else = 1;
-        } else if (strcmp(line, "fi") == 0) {
-            free(line);
-            break;
-        } else if (in_then) {
-            then_cmds[then_count++] = strdup(line);
-        } else if (in_else) {
-            else_cmds[else_count++] = strdup(line);
-        }
-
-        free(line);
-    }
-
-    /* Run the if command */
-    pid_t pid = fork();
-    if (pid == 0) {
-        execl("/bin/sh", "sh", "-c", if_cmd, NULL);
-        perror("exec if");
-        exit(1);
-    }
-
-    int status;
-    waitpid(pid, &status, 0);
-    int exit_code = WEXITSTATUS(status);
-
-    if (exit_code == 0) {
-        for (int i = 0; i < then_count; ++i) {
-            execute_command(then_cmds[i]);
-            free(then_cmds[i]);
-        }
-    } else {
-        for (int i = 0; i < else_count; ++i) {
-            execute_command(else_cmds[i]);
-            free(else_cmds[i]);
-        }
-    }
-
-    free(if_cmd);
-    return 1;
+int handle_if_block(char *line) {
+    // Optional for next features
+    return 0;
 }

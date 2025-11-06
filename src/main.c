@@ -2,13 +2,13 @@
 
 int main() {
     char *line;
-
     init_shell();
 
     while (1) {
-        reap_background_jobs(); // reap zombies
         line = readline("myshell> ");
-        if (!line) break;
+        if (!line)
+            break;
+
         trim(line);
 
         if (strlen(line) == 0) {
@@ -16,25 +16,40 @@ int main() {
             continue;
         }
 
-        /* --- handle exit --- */
+        add_history(line);
+
+        // Exit command
         if (strcmp(line, "exit") == 0) {
             free(line);
             break;
         }
 
-        /* --- handle if-then-else block --- */
-        if (strncmp(line, "if", 2) == 0 && (line[2] == ' ' || line[2] == '\0')) {
-            handle_if_block(line);
+        // Handle variable assignment: VAR=value
+        char *eq = strchr(line, '=');
+        if (eq && eq != line) {
+            *eq = '\0';
+            char *var = line;
+            char *val = eq + 1;
+            trim(var);
+            trim(val);
+            set_variable(var, val);
             free(line);
             continue;
         }
 
-        /* --- handle normal commands (including pipes, redirection, etc.) --- */
-        execute_command(line);
+        // Handle "set" command
+        if (strcmp(line, "set") == 0) {
+            print_all_variables();
+            free(line);
+            continue;
+        }
+
+        // Expand variables before execution
+        char *expanded = expand_vars_in_string(line);
+        execute_command(expanded);
+        free(expanded);
         free(line);
     }
 
-    printf("Exiting shell...\n");
     return 0;
 }
-
