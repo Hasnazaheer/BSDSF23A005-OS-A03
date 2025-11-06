@@ -1,58 +1,39 @@
 #include "shell.h"
 
-/* forward */
-void shell_loop(void);
-
-int main(void) {
-    /* initialize GNU readline's history */
-    using_history();
-
-    printf("Welcome to MyShell (Feature-5: I/O Redirection & Pipes)\n");
-    shell_loop();
-    return 0;
-}
-
-void shell_loop(void) {
+int main() {
     char *line = NULL;
-    command_t *cmds = NULL;
-    int ncmds = 0;
+    size_t len = 0;
+    ssize_t nread;
+
+    init_shell();
 
     while (1) {
-        line = read_line_rl();
-        if (line == NULL) { /* EOF */
+        reap_background_jobs();  // Clean finished jobs
+        printf("myshell> ");
+        fflush(stdout);
+
+        nread = getline(&line, &len, stdin);
+        if (nread == -1) {
             printf("\n");
             break;
         }
 
-        /* skip empty / whitespace-only lines */
-        char *p = line;
-        while (*p == ' ' || *p == '\t') p++;
-        if (*p == '\0') { free(line); continue; }
+        if (line[nread - 1] == '\n')
+            line[nread - 1] = '\0';
 
-        /* expand !n or other history-handling if you had it - here we rely on readline history */
-        add_history(line);
-
-        /* parse pipeline */
-        cmds = parse_pipeline(line, &ncmds);
-        if (cmds == NULL) {
-            free(line);
+        if (strlen(line) == 0)
             continue;
+
+        // Split by semicolon (;)
+        char *cmd_str = strtok(line, ";");
+        while (cmd_str != NULL) {
+            trim(cmd_str);
+            if (strlen(cmd_str) > 0)
+                execute_command(cmd_str);
+            cmd_str = strtok(NULL, ";");
         }
-
-        /* if single stage and builtin, handle it in the shell process */
-        if (ncmds == 1 && cmds[0].args && cmds[0].args[0]) {
-            if (handle_builtin(cmds[0].args)) {
-                free_commands(cmds, ncmds);
-                free(line);
-                continue;
-            }
-        }
-
-        /* execute pipeline (handles forking etc) */
-        execute_pipeline(cmds, ncmds);
-
-        /* cleanup */
-        free_commands(cmds, ncmds);
-        free(line);
     }
+
+    free(line);
+    return 0;
 }

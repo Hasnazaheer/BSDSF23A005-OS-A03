@@ -3,33 +3,29 @@
 
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 #include <unistd.h>
+#include <string.h>
 #include <sys/types.h>
 #include <sys/wait.h>
-#include <readline/readline.h>
-#include <readline/history.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <signal.h>
 
-#define TOKEN_DELIM " \t\r\n"
-#define MAX_TOKENS 128
+#define MAX_JOBS 100
+#define MAX_CMD_LEN 1024
+#define MAX_ARGS 100
 
-/* Command structure for a single pipeline stage */
 typedef struct {
-    char **args;      /* NULL-terminated argv */
-    char *infile;     /* filename for input redirection or NULL */
-    char *outfile;    /* filename for output redirection or NULL */
-} command_t;
+    pid_t pid;
+    char cmd[MAX_CMD_LEN];
+} Job;
 
-/* Parser / shell API */
-char *read_line_rl(void);
-char **tokenize(char *line);
-command_t *parse_pipeline(char *line, int *out_count);
-void free_commands(command_t *cmds, int count);
+extern Job jobs[MAX_JOBS];
+extern int job_count;
 
-/* Builtins */
-int handle_builtin(char **args);  /* returns 1 if handled, 0 otherwise */
+void init_shell();
+void trim(char *str);
+void reap_background_jobs();
+void execute_command(char *cmd_line);
 
-/* Executor */
-int execute_pipeline(command_t *cmds, int n);
-
-#endif /* SHELL_H */
+#endif
