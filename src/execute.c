@@ -1,60 +1,46 @@
 #include "shell.h"
 
-void execute_command(char *cmd_line) {
-    char *args[MAX_ARGS];
-    int background = 0;
-    char *token;
-    int i = 0;
+int execute_pipeline(Command *cmds, int n) {
+    if (n <= 0) return 1;
 
-    // Detect background execution (&)
-    if (cmd_line[strlen(cmd_line) - 1] == '&') {
-        background = 1;
-        cmd_line[strlen(cmd_line) - 1] = '\0';
-        trim(cmd_line);
+    int (*pipes)[2] = NULL;
+    if (n > 1) {
+        pipes = malloc((n - 1) * sizeof(int[2]));
+        for (int i = 0; i < n - 1; ++i) pipe(pipes[i]);
     }
 
-    // Tokenize command
-    token = strtok(cmd_line, " ");
-    while (token != NULL && i < MAX_ARGS - 1) {
-        args[i++] = token;
-        token = strtok(NULL, " ");
-    }
-    args[i] = NULL;
+    pid_t *pids = malloc(n * sizeof(pid_t));
 
-    if (args[0] == NULL)
-        return;
+    for (int i = 0; i < n; ++i) {
+        pid_t pid = fork();
+        if (pid == 0) {
+            if (i > 0) dup2(pipes[i - 1][0], STDIN_FILENO);
+            if (i < n - 1) dup2(pipes[i][1], STDOUT_FILENO);
 
-    // Built-in commands
-    if (strcmp(args[0], "exit") == 0) {
-        printf("Exiting shell...\n");
-        exit(0);
-    }
-    if (strcmp(args[0], "jobs") == 0) {
-        for (int j = 0; j < job_count; j++) {
-            printf("[%d] PID=%d CMD=%s\n", j + 1, jobs[j].pid, jobs[j].cmd);
-        }
-        return;
-    }
+            if (pipes) {
+                for (int k = 0; k < n - 1; ++k) {
+                    close(pipes[k][0]);
+                    close(pipes[k][1]);
+                }
+            }
 
-    pid_t pid = fork();
-    if (pid < 0) {
-        perror("fork");
-        return;
-    } else if (pid == 0) {
-        // Child process
-        execvp(args[0], args);
-        perror("execvp");
-        exit(EXIT_FAILURE);
-    } else {
-        // Parent process
-        if (background) {
-            printf("[Background] PID=%d CMD=%s\n", pid, args[0]);
-            jobs[job_count].pid = pid;
-            snprintf(jobs[job_count].cmd, sizeof(jobs[job_count].cmd), "%s", args[0]);
-            job_count++;
+            execvp(cmds[i].args[0], cmds[i].args);
+            fprintf(stderr, "myshell: %s: %s\n", cmds[i].args[0], strerror(errno));
+            exit(EXIT_FAILURE);
         } else {
-            waitpid(pid, NULL, 0);
+            pids[i] = pid;
         }
     }
-}
 
+    if (pipes) {
+        for (int k = 0; k < n - 1; ++k) {
+            close(pipes[k][0]);
+            close(pipes[k][1]);
+        }
+        free(pipes);
+    }
+
+    for (int i = 0; i < n; ++i) waitpid(pids[i], NULL, 0);
+    free(pids);
+    return 1;
+}

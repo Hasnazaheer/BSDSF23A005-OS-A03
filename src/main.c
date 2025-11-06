@@ -1,39 +1,40 @@
 #include "shell.h"
 
 int main() {
-    char *line = NULL;
-    size_t len = 0;
-    ssize_t nread;
+    char *line;
 
     init_shell();
 
     while (1) {
-        reap_background_jobs();  // Clean finished jobs
-        printf("myshell> ");
-        fflush(stdout);
+        reap_background_jobs(); // reap zombies
+        line = readline("myshell> ");
+        if (!line) break;
+        trim(line);
 
-        nread = getline(&line, &len, stdin);
-        if (nread == -1) {
-            printf("\n");
+        if (strlen(line) == 0) {
+            free(line);
+            continue;
+        }
+
+        /* --- handle exit --- */
+        if (strcmp(line, "exit") == 0) {
+            free(line);
             break;
         }
 
-        if (line[nread - 1] == '\n')
-            line[nread - 1] = '\0';
-
-        if (strlen(line) == 0)
+        /* --- handle if-then-else block --- */
+        if (strncmp(line, "if", 2) == 0 && (line[2] == ' ' || line[2] == '\0')) {
+            handle_if_block(line);
+            free(line);
             continue;
-
-        // Split by semicolon (;)
-        char *cmd_str = strtok(line, ";");
-        while (cmd_str != NULL) {
-            trim(cmd_str);
-            if (strlen(cmd_str) > 0)
-                execute_command(cmd_str);
-            cmd_str = strtok(NULL, ";");
         }
+
+        /* --- handle normal commands (including pipes, redirection, etc.) --- */
+        execute_command(line);
+        free(line);
     }
 
-    free(line);
+    printf("Exiting shell...\n");
     return 0;
 }
+
