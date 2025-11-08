@@ -29,12 +29,14 @@ typedef struct {
     int background;
 } Command;
 
-/* function declarations */
+/* Function declarations */
 void init_shell();
 void reap_background_jobs();
 void add_job(pid_t pid, const char *cmd);
 void list_jobs();
 void trim(char *str);
+
+int handle_builtin(char **args);
 int execute_command(char *line);
 int execute_pipeline(Command *cmds, int n);
 int handle_if_block(const char *first_line);
