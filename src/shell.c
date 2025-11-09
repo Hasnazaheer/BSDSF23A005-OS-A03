@@ -1,7 +1,10 @@
-#define _GNU_SOURCE
 #include "shell.h"
 #include <fcntl.h>
 #include <errno.h>
+
+/* Background jobs list */
+bg_job_t bg_jobs[MAX_BG_JOBS];
+int bg_job_count = 0;
 
 /* ----------------- readline wrapper ----------------- */
 char *read_line_rl(void) {
@@ -9,11 +12,7 @@ char *read_line_rl(void) {
     return line; /* readline returns malloc'd string or NULL on EOF */
 }
 
-/* ----------------- tokenizer -----------------
-   Break a single command into tokens, preserving token order.
-   Returns a malloc'd argv (NULL terminated). Caller must not free tokens themselves
-   (they are pointers into the line buffer), but free the argv array.
-*/
+/* ----------------- tokenizer ----------------- */
 char **tokenize(char *line) {
     int bufsize = MAX_TOKENS, position = 0;
     char **tokens = malloc(bufsize * sizeof(char*));
@@ -41,20 +40,53 @@ char **tokenize(char *line) {
     return tokens;
 }
 
-/* ----------------- parsing pipeline -----------------
-   Input line is a full command like:
-     cmd1 arg1 < in | cmd2 arg2 > out
-   We parse by splitting on '|' first (but keeping original substrings),
-   then for each part, parse tokens and detect '<' and '>' and the following filename.
-*/
+/* ----------------- split commands by ';' ----------------- */
+char **split_commands(char *line, int *count) {
+    int bufsize = 16;
+    char **commands = malloc(bufsize * sizeof(char*));
+    int n = 0;
+
+    char *saveptr = NULL;
+    char *cmd = strtok_r(line, ";", &saveptr);
+    while (cmd != NULL) {
+        while (*cmd == ' ' || *cmd == '\t') cmd++;
+        char *end = cmd + strlen(cmd) - 1;
+        while (end > cmd && (*end == ' ' || *end == '\t')) { *end = '\0'; end--; }
+
+        commands[n++] = strdup(cmd);
+        if (n >= bufsize) {
+            bufsize *= 2;
+            commands = realloc(commands, bufsize * sizeof(char*));
+        }
+
+        cmd = strtok_r(NULL, ";", &saveptr);
+    }
+    *count = n;
+    return commands;
+}
+
+/* ----------------- detect background '&' ----------------- */
+int is_background(char *cmd) {
+    int len = strlen(cmd);
+    if (len > 0 && cmd[len - 1] == '&') {
+        cmd[len - 1] = '\0';
+        len--;
+        while (len > 0 && (cmd[len-1] == ' ' || cmd[len-1] == '\t')) {
+            cmd[len-1] = '\0';
+            len--;
+        }
+        return 1;
+    }
+    return 0;
+}
+
+/* ----------------- parsing pipeline ----------------- */
 command_t *parse_pipeline(char *line, int *out_count) {
     if (!line) { *out_count = 0; return NULL; }
 
-    /* Duplicate line because strtok/routines will modify substrings */
     char *line_dup = strdup(line);
     if (!line_dup) { *out_count = 0; return NULL; }
 
-    /* First, count number of pipeline stages (split on '|') */
     int max_stages = 16;
     char **stages = malloc(max_stages * sizeof(char*));
     int stage_count = 0;
@@ -62,7 +94,6 @@ command_t *parse_pipeline(char *line, int *out_count) {
     char *saveptr = NULL;
     char *stage = strtok_r(line_dup, "|", &saveptr);
     while (stage != NULL) {
-        /* trim leading/trailing spaces of stage */
         while (*stage == ' ' || *stage == '\t') stage++;
         char *end = stage + strlen(stage) - 1;
         while (end > stage && (*end == ' ' || *end == '\t')) { *end = '\0'; end--; }
@@ -82,7 +113,6 @@ command_t *parse_pipeline(char *line, int *out_count) {
         return NULL;
     }
 
-    /* Allocate command_t array */
     command_t *cmds = calloc(stage_count, sizeof(command_t));
     if (!cmds) {
         for (int i = 0; i < stage_count; ++i) free(stages[i]);
@@ -91,17 +121,14 @@ command_t *parse_pipeline(char *line, int *out_count) {
         return NULL;
     }
 
-    /* For each stage parse tokens and detect < and > */
     for (int i = 0; i < stage_count; ++i) {
         cmds[i].infile = NULL;
         cmds[i].outfile = NULL;
         cmds[i].args = NULL;
 
-        /* Create a working copy because tokenize modifies string */
         char *work = strdup(stages[i]);
         if (!work) continue;
 
-        /* manual token scan to handle < and > */
         char *tok;
         int argv_cap = 16, argv_n = 0;
         char **argv = malloc(argv_cap * sizeof(char*));
@@ -110,22 +137,14 @@ command_t *parse_pipeline(char *line, int *out_count) {
         tok = strtok(work, TOKEN_DELIM);
         while (tok != NULL) {
             if (strcmp(tok, "<") == 0) {
-                /* next token should be infile */
                 tok = strtok(NULL, TOKEN_DELIM);
-                if (tok != NULL) {
-                    cmds[i].infile = strdup(tok);
-                } else {
-                    fprintf(stderr, "myshell: syntax error near unexpected token `newline' after '<'\n");
-                }
+                if (tok != NULL) cmds[i].infile = strdup(tok);
+                else fprintf(stderr, "myshell: syntax error near unexpected token `<'\n");
             } else if (strcmp(tok, ">") == 0) {
                 tok = strtok(NULL, TOKEN_DELIM);
-                if (tok != NULL) {
-                    cmds[i].outfile = strdup(tok);
-                } else {
-                    fprintf(stderr, "myshell: syntax error near unexpected token `newline' after '>'\n");
-                }
+                if (tok != NULL) cmds[i].outfile = strdup(tok);
+                else fprintf(stderr, "myshell: syntax error near unexpected token `>'\n");
             } else {
-                /* normal argument */
                 if (argv_n + 1 >= argv_cap) {
                     argv_cap *= 2;
                     argv = realloc(argv, argv_cap * sizeof(char*));
@@ -146,7 +165,7 @@ command_t *parse_pipeline(char *line, int *out_count) {
     return cmds;
 }
 
-/* free command_t array (frees strings and arrays) */
+/* ----------------- free command_t array ----------------- */
 void free_commands(command_t *cmds, int count) {
     if (!cmds) return;
     for (int i = 0; i < count; ++i) {
@@ -160,7 +179,7 @@ void free_commands(command_t *cmds, int count) {
     free(cmds);
 }
 
-/* ----------------- builtins (reuse earlier features) ----------------- */
+/* ----------------- builtins ----------------- */
 int handle_builtin(char **args) {
     if (args == NULL || args[0] == NULL) return 1;
 
@@ -170,35 +189,31 @@ int handle_builtin(char **args) {
     }
 
     if (strcmp(args[0], "cd") == 0) {
-        if (args[1] == NULL) {
-            fprintf(stderr, "myshell: expected argument to \"cd\"\n");
-        } else {
-            if (chdir(args[1]) != 0) perror("myshell");
-        }
+        if (args[1] == NULL) fprintf(stderr, "myshell: expected argument to \"cd\"\n");
+        else if (chdir(args[1]) != 0) perror("myshell");
         return 1;
     }
 
     if (strcmp(args[0], "help") == 0) {
-        printf("Built-in commands:\n");
-        printf("  cd <dir>\n  help\n  exit\n  jobs\n  history\n");
+        printf("Built-in commands:\n  cd <dir>\n  help\n  exit\n  jobs\n  history\n");
         return 1;
     }
 
     if (strcmp(args[0], "jobs") == 0) {
-        printf("Job control not yet implemented.\n");
+        if (bg_job_count == 0) { printf("No background jobs.\n"); return 1; }
+        for (int i = 0; i < bg_job_count; i++) {
+            printf("[%d] %s\n", bg_jobs[i].pid, bg_jobs[i].cmdline);
+        }
         return 1;
     }
 
     if (strcmp(args[0], "history") == 0) {
         HIST_ENTRY **hist_list = history_list();
         if (!hist_list) { printf("No history.\n"); return 1; }
-        int idx = history_length; /* history_length is a variable, not a function */
-
-        for (int i = 0; i < idx; ++i) {
-            printf("%4d  %s\n", i+1, hist_list[i]->line);
-        }
+        int idx = history_length;
+        for (int i = 0; i < idx; ++i) printf("%4d  %s\n", i+1, hist_list[i]->line);
         return 1;
     }
 
-    return 0; /* not handled */
+    return 0;
 }
