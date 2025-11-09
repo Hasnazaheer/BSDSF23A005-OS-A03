@@ -1,90 +1,66 @@
-#include <stdio.h>      // printf, snprintf, perror
-#include <stdlib.h>     // exit, EXIT_FAILURE
-#include <string.h>     // strlen, strcmp, strchr
-#include <unistd.h>     // fork, execvp
-#include <sys/wait.h>   // waitpid, WNOHANG
-#include <signal.h>     // signal, SIGCHLD
-#include "shell.h"      // Job struct, jobs array, job_count, trim
+#include "shell.h"
+#include <errno.h>
+#include <sys/wait.h>
+#include <string.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <stdio.h>
 
-#define MAX_ARGS 64     // Maximum number of arguments per command
+int execute_pipeline(command_t *cmds, int n) {
+    if (n <= 0) return 1;
 
-void execute_command(char *cmd_line) {
-    char *args[MAX_ARGS];
-    int background = 0;
-    int i = 0;
+    int (*pipes)[2] = NULL;
+    pid_t *pids = malloc(n * sizeof(pid_t));
+    if (!pids) { perror("malloc"); return 1; }
 
-    // Trim leading/trailing whitespace
-    trim(cmd_line);
-    if (strlen(cmd_line) == 0)
-        return;
-
-    // Check for background execution
-    size_t len = strlen(cmd_line);
-    if (cmd_line[len - 1] == '&') {
-        background = 1;
-        cmd_line[len - 1] = '\0';
-        trim(cmd_line);
+    if (n > 1) {
+        pipes = malloc((n - 1) * sizeof(int[2]));
+        if (!pipes) { perror("malloc"); free(pids); return 1; }
+        for (int i = 0; i < n - 1; ++i) {
+            if (pipe(pipes[i]) == -1) { perror("pipe"); free(pipes); free(pids); return 1; }
+        }
     }
 
-    // Parse command with support for quoted arguments
-    char *p = cmd_line;
-    while (*p != '\0' && i < MAX_ARGS - 1) {
-        // Skip spaces
-        while (*p == ' ' || *p == '\t') p++;
-        if (*p == '\0') break;
+    for (int i = 0; i < n; ++i) {
+        pid_t pid = fork();
+        if (pid < 0) { perror("fork"); exit(EXIT_FAILURE); }
+        else if (pid == 0) {
+            if (i > 0) dup2(pipes[i - 1][0], STDIN_FILENO);
+            if (i < n - 1) dup2(pipes[i][1], STDOUT_FILENO);
 
-        if (*p == '"') {
-            // Quoted string
-            p++; // skip opening quote
-            args[i++] = p;
-            while (*p != '"' && *p != '\0') p++;
-            if (*p == '"') *p++ = '\0'; // terminate and skip closing quote
+            if (pipes) {
+                for (int k = 0; k < n - 1; ++k) { close(pipes[k][0]); close(pipes[k][1]); }
+            }
+
+            if (cmds[i].infile) {
+                int fd = open(cmds[i].infile, O_RDONLY);
+                if (fd < 0) { perror(cmds[i].infile); exit(EXIT_FAILURE); }
+                dup2(fd, STDIN_FILENO);
+                close(fd);
+            }
+
+            if (cmds[i].outfile) {
+                int fd = open(cmds[i].outfile, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+                if (fd < 0) { perror(cmds[i].outfile); exit(EXIT_FAILURE); }
+                dup2(fd, STDOUT_FILENO);
+                close(fd);
+            }
+
+            if (!cmds[i].args || !cmds[i].args[0]) exit(EXIT_SUCCESS);
+            execvp(cmds[i].args[0], cmds[i].args);
+            fprintf(stderr, "myshell: %s: %s\n", cmds[i].args[0], strerror(errno));
+            exit(EXIT_FAILURE);
         } else {
-            // Non-quoted argument
-            args[i++] = p;
-            while (*p != ' ' && *p != '\t' && *p != '\0') p++;
-            if (*p != '\0') *p++ = '\0';
+            pids[i] = pid;
+            if (i > 0) { close(pipes[i - 1][0]); close(pipes[i - 1][1]); }
         }
     }
-    args[i] = NULL;
 
-    if (args[0] == NULL)
-        return;
+    if (pipes) { for (int k = 0; k < n - 1; ++k) { close(pipes[k][0]); close(pipes[k][1]); } free(pipes); }
 
-    // Built-in commands
-    if (strcmp(args[0], "exit") == 0) {
-        printf("Exiting shell...\n");
-        exit(0);
-    }
-
-    if (strcmp(args[0], "jobs") == 0) {
-        for (int j = 0; j < job_count; j++) {
-            printf("[%d] PID=%d CMD=%s\n", j + 1, jobs[j].pid, jobs[j].cmd);
-        }
-        return;
-    }
-
-    // Fork and execute
-    pid_t pid = fork();
-    if (pid < 0) {
-        perror("fork");
-        return;
-    } else if (pid == 0) {
-        // Child process
-        execvp(args[0], args);
-        perror("execvp");
-        exit(EXIT_FAILURE);
-    } else {
-        // Parent process
-        if (background) {
-            printf("[Background] PID=%d CMD=%s\n", pid, args[0]);
-            jobs[job_count].pid = pid;
-            snprintf(jobs[job_count].cmd, sizeof(jobs[job_count].cmd), "%s", args[0]);
-            job_count++;
-        } else {
-            // Wait for foreground command before moving to next command
-            int status;
-            waitpid(pid, &status, 0);
-        }
-    }
+    int status;
+    for (int i = 0; i < n; ++i) waitpid(pids[i], &status, 0);
+    free(pids);
+    return 1;
 }

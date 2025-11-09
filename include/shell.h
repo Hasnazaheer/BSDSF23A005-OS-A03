@@ -3,29 +3,48 @@
 
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
 #include <string.h>
+#include <unistd.h>
 #include <sys/types.h>
 #include <sys/wait.h>
-#include <fcntl.h>
-#include <errno.h>
-#include <signal.h>
+#include <readline/readline.h>
+#include <readline/history.h>
 
-#define MAX_JOBS 100
-#define MAX_CMD_LEN 1024
-#define MAX_ARGS 100
-#define MAX_INPUT_SIZE 1024 
+#define TOKEN_DELIM " \t\r\n"
+#define MAX_TOKENS 128
+#define MAX_BG_JOBS 64
+
+/* Command structure for a single pipeline stage */
+typedef struct {
+    char **args;      /* NULL-terminated argv */
+    char *infile;     /* filename for input redirection or NULL */
+    char *outfile;    /* filename for output redirection or NULL */
+} command_t;
+
+/* Background job structure */
 typedef struct {
     pid_t pid;
-    char cmd[MAX_CMD_LEN];
-} Job;
+    char *cmdline;
+} bg_job_t;
 
-extern Job jobs[MAX_JOBS];
-extern int job_count;
+/* Parser / shell API */
+char *read_line_rl(void);
+char **tokenize(char *line);
+command_t *parse_pipeline(char *line, int *out_count);
+void free_commands(command_t *cmds, int count);
 
-void init_shell();
-void trim(char *str);
-void reap_background_jobs();
-void execute_command(char *cmd_line);
-void shell_loop();
-#endif
+/* Command chaining and background */
+char **split_commands(char *line, int *count);
+int is_background(char *cmd);
+
+/* Builtins */
+int handle_builtin(char **args);
+
+/* Executor */
+int execute_pipeline(command_t *cmds, int n);
+
+/* Global background job list */
+extern bg_job_t bg_jobs[MAX_BG_JOBS];
+extern int bg_job_count;
+
+#endif /* SHELL_H */
