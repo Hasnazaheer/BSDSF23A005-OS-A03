@@ -3,40 +3,37 @@
 
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
 #include <string.h>
+#include <unistd.h>
+#include <sys/types.h>
 #include <sys/wait.h>
-#include <fcntl.h>
-#include <errno.h>
-#include <signal.h>
 #include <readline/readline.h>
 #include <readline/history.h>
 
-#define MAX_JOBS 100
-#define MAX_ARGS 100
-#define MAX_CMDS 50
+#define TOKEN_DELIM " \t\r\n"
+#define MAX_TOKENS 128
 
+/* Command structure for a single pipeline stage */
 typedef struct {
-    pid_t pid;
-    char cmdline[256];
-    int running;
-} Job;
+    char **args;      /* NULL-terminated argv */
+    char *infile;     /* filename for input redirection or NULL */
+    char *outfile;    /* filename for output redirection or NULL */
+    int background;   /* 1 if & at end */
+} command_t;
 
-typedef struct {
-    char *args[MAX_ARGS];
-    char *input_file;
-    char *output_file;
-    int background;
-} Command;
+/* Parser / shell API */
+char *read_line_rl(void);
+char **tokenize(char *line);
+command_t *parse_pipeline(char *line, int *out_count);
+void free_commands(command_t *cmds, int count);
 
-/* function declarations */
-void init_shell();
-void reap_background_jobs();
-void add_job(pid_t pid, const char *cmd);
-void list_jobs();
-void trim(char *str);
-int execute_command(char *line);
-int execute_pipeline(Command *cmds, int n);
-int handle_if_block(const char *first_line);
+/* Builtins */
 
-#endif
+int handle_builtin(char **args);  /* returns 1 if handled, 0 otherwise */
+int handle_if_structure(char **lines, int n_lines); 
+void check_bg_jobs(void);
+
+/* Executor */
+int execute_pipeline(command_t *cmds, int n);
+
+#endif /* SHELL_H */

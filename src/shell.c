@@ -1,148 +1,233 @@
 #include "shell.h"
+#include <fcntl.h>
+#include <errno.h>
 
-static Job jobs[MAX_JOBS];
-static int job_count = 0;
-
-void init_shell() {
-    using_history();
-    printf("Welcome to myshell (v7: if-then-else)\n");
+/* ----------------- readline wrapper ----------------- */
+char *read_line_rl(void) {
+    char *line = readline("myshell> ");
+    return line; /* readline returns malloc'd string or NULL on EOF */
 }
 
-void add_job(pid_t pid, const char *cmd) {
-    if (job_count < MAX_JOBS) {
-        jobs[job_count].pid = pid;
-        strcpy(jobs[job_count].cmdline, cmd);
-        jobs[job_count].running = 1;
-        job_count++;
+/* ----------------- tokenizer ----------------- */
+char **tokenize(char *line) {
+    int bufsize = MAX_TOKENS, position = 0;
+    char **tokens = malloc(bufsize * sizeof(char*));
+    char *token;
+
+    if (!tokens) {
+        fprintf(stderr, "myshell: allocation error\n");
+        exit(EXIT_FAILURE);
     }
-}
 
-void reap_background_jobs() {
-    int status;
-    for (int i = 0; i < job_count; ++i) {
-        if (jobs[i].running) {
-            pid_t result = waitpid(jobs[i].pid, &status, WNOHANG);
-            if (result > 0) {
-                jobs[i].running = 0;
-                printf("[Done] %s (PID=%d)\n", jobs[i].cmdline, jobs[i].pid);
+    token = strtok(line, TOKEN_DELIM);
+    while (token != NULL) {
+        tokens[position++] = token;
+        if (position >= bufsize) {
+            bufsize *= 2;
+            tokens = realloc(tokens, bufsize * sizeof(char*));
+            if (!tokens) {
+                fprintf(stderr, "myshell: allocation error\n");
+                exit(EXIT_FAILURE);
             }
         }
+        token = strtok(NULL, TOKEN_DELIM);
     }
+    tokens[position] = NULL;
+    return tokens;
 }
 
-void list_jobs() {
-    for (int i = 0; i < job_count; ++i) {
-        if (jobs[i].running)
-            printf("[%d] Running: %s\n", jobs[i].pid, jobs[i].cmdline);
-    }
-}
+/* ----------------- parsing pipeline ----------------- */
+command_t *parse_pipeline(char *line, int *out_count) {
+    if (!line) { *out_count = 0; return NULL; }
 
-void trim(char *str) {
-    char *end;
-    while (*str == ' ' || *str == '\t') str++;
-    end = str + strlen(str) - 1;
-    while (end > str && (*end == ' ' || *end == '\t')) *end-- = '\0';
-}
+    char *line_dup = strdup(line);
+    if (!line_dup) { *out_count = 0; return NULL; }
 
-/* ---------- execute_command() -------------- */
-int execute_command(char *line) {
-    char *commands[MAX_CMDS];
-    int cmd_count = 0;
-    char *token = strtok(line, ";");
+    int max_stages = 16;
+    char **stages = malloc(max_stages * sizeof(char*));
+    int stage_count = 0;
 
-    while (token && cmd_count < MAX_CMDS) {
-        commands[cmd_count++] = token;
-        token = strtok(NULL, ";");
-    }
+    char *saveptr = NULL;
+    char *stage = strtok_r(line_dup, "|", &saveptr);
+    while (stage != NULL) {
+        while (*stage == ' ' || *stage == '\t') stage++;
+        char *end = stage + strlen(stage) - 1;
+        while (end > stage && (*end == ' ' || *end == '\t')) { *end = '\0'; end--; }
 
-    for (int i = 0; i < cmd_count; i++) {
-        char *cmd = commands[i];
-        trim(cmd);
-
-        if (strlen(cmd) == 0) continue;
-
-        /* background execution */
-        int background = 0;
-        if (cmd[strlen(cmd)-1] == '&') {
-            background = 1;
-            cmd[strlen(cmd)-1] = '\0';
-            trim(cmd);
+        stages[stage_count++] = strdup(stage);
+        if (stage_count >= max_stages) {
+            max_stages *= 2;
+            stages = realloc(stages, max_stages * sizeof(char*));
         }
+        stage = strtok_r(NULL, "|", &saveptr);
+    }
+    free(line_dup);
 
-        pid_t pid = fork();
-        if (pid == 0) {
-            /* Child */
-            execl("/bin/sh", "sh", "-c", cmd, NULL);
-            perror("exec");
-            exit(EXIT_FAILURE);
-        } else if (pid > 0) {
-            if (background) {
-                add_job(pid, cmd);
+    if (stage_count == 0) {
+        free(stages);
+        *out_count = 0;
+        return NULL;
+    }
+
+    command_t *cmds = calloc(stage_count, sizeof(command_t));
+    if (!cmds) {
+        for (int i = 0; i < stage_count; ++i) free(stages[i]);
+        free(stages);
+        *out_count = 0;
+        return NULL;
+    }
+
+    for (int i = 0; i < stage_count; ++i) {
+        cmds[i].infile = NULL;
+        cmds[i].outfile = NULL;
+        cmds[i].args = NULL;
+        cmds[i].background = 0;
+
+        char *work = strdup(stages[i]);
+        if (!work) continue;
+
+        char *tok;
+        int argv_cap = 16, argv_n = 0;
+        char **argv = malloc(argv_cap * sizeof(char*));
+        if (!argv) { free(work); continue; }
+
+        tok = strtok(work, TOKEN_DELIM);
+        while (tok != NULL) {
+            if (strcmp(tok, "<") == 0) {
+                tok = strtok(NULL, TOKEN_DELIM);
+                if (tok != NULL) {
+                    cmds[i].infile = strdup(tok);
+                } else {
+                    fprintf(stderr, "myshell: syntax error near unexpected token `newline' after '<'\n");
+                }
+            } else if (strcmp(tok, ">") == 0) {
+                tok = strtok(NULL, TOKEN_DELIM);
+                if (tok != NULL) {
+                    cmds[i].outfile = strdup(tok);
+                } else {
+                    fprintf(stderr, "myshell: syntax error near unexpected token `newline' after '>'\n");
+                }
+            } else if (strcmp(tok, "&") == 0) {
+                cmds[i].background = 1; // mark background
             } else {
-                int status;
-                waitpid(pid, &status, 0);
+                if (argv_n + 1 >= argv_cap) {
+                    argv_cap *= 2;
+                    argv = realloc(argv, argv_cap * sizeof(char*));
+                }
+                argv[argv_n++] = strdup(tok);
             }
-        } else {
-            perror("fork");
+            tok = strtok(NULL, TOKEN_DELIM);
         }
+        argv[argv_n] = NULL;
+        cmds[i].args = argv;
+        free(work);
     }
-    return 1;
+
+    for (int i = 0; i < stage_count; ++i) free(stages[i]);
+    free(stages);
+
+    *out_count = stage_count;
+    return cmds;
 }
 
-/* ---------- handle_if_block() -------------- */
-int handle_if_block(const char *first_line) {
-    char *if_cmd = strdup(first_line + 2);
-    trim(if_cmd);
-
-    char *then_cmds[100], *else_cmds[100];
-    int then_count = 0, else_count = 0;
-    int in_then = 0, in_else = 0;
-
-    char *line;
-    while ((line = readline("> ")) != NULL) {
-        trim(line);
-
-        if (strcmp(line, "then") == 0) {
-            in_then = 1;
-        } else if (strcmp(line, "else") == 0) {
-            in_then = 0;
-            in_else = 1;
-        } else if (strcmp(line, "fi") == 0) {
-            free(line);
-            break;
-        } else if (in_then) {
-            then_cmds[then_count++] = strdup(line);
-        } else if (in_else) {
-            else_cmds[else_count++] = strdup(line);
+/* free command_t array */
+void free_commands(command_t *cmds, int count) {
+    if (!cmds) return;
+    for (int i = 0; i < count; ++i) {
+        if (cmds[i].args) {
+            for (int j = 0; cmds[i].args[j] != NULL; ++j) free(cmds[i].args[j]);
+            free(cmds[i].args);
         }
+        if (cmds[i].infile) free(cmds[i].infile);
+        if (cmds[i].outfile) free(cmds[i].outfile);
+    }
+    free(cmds);
+}
 
-        free(line);
+/* ----------------- builtins ----------------- */
+int handle_builtin(char **args) {
+    if (args == NULL || args[0] == NULL) return 1;
+
+    if (strcmp(args[0], "exit") == 0) {
+        printf("Exiting myshell...\n");
+        exit(0);
     }
 
-    /* Run the if command */
-    pid_t pid = fork();
-    if (pid == 0) {
-        execl("/bin/sh", "sh", "-c", if_cmd, NULL);
-        perror("exec if");
-        exit(1);
+    if (strcmp(args[0], "cd") == 0) {
+        if (args[1] == NULL) {
+            fprintf(stderr, "myshell: expected argument to \"cd\"\n");
+        } else {
+            if (chdir(args[1]) != 0) perror("myshell");
+        }
+        return 1;
     }
 
-    int status;
-    waitpid(pid, &status, 0);
-    int exit_code = WEXITSTATUS(status);
+    if (strcmp(args[0], "help") == 0) {
+        printf("Built-in commands:\n");
+        printf("  cd <dir>\n  help\n  exit\n  jobs\n  history\n");
+        return 1;
+    }
 
-    if (exit_code == 0) {
-        for (int i = 0; i < then_count; ++i) {
-            execute_command(then_cmds[i]);
-            free(then_cmds[i]);
+    if (strcmp(args[0], "jobs") == 0) {
+        HIST_ENTRY **hist_list = history_list();
+        if (!hist_list) { printf("No history.\n"); return 1; }
+        int idx = history_length;
+        for (int i = 0; i < idx; ++i) {
+            printf("%4d  %s\n", i+1, hist_list[i]->line);
         }
-    } else {
-        for (int i = 0; i < else_count; ++i) {
-            execute_command(else_cmds[i]);
-            free(else_cmds[i]);
+        return 1;
+    }
+
+    if (strcmp(args[0], "history") == 0) {
+        HIST_ENTRY **hist_list = history_list();
+        if (!hist_list) { printf("No history.\n"); return 1; }
+        int idx = history_length;
+        for (int i = 0; i < idx; ++i) {
+            printf("%4d  %s\n", i+1, hist_list[i]->line);
+        }
+        return 1;
+    }
+
+    return 0;
+}
+int handle_if_structure(char **lines, int n_lines) {
+    if (n_lines <= 0) return 1;
+
+    int status = 0;
+
+    // Execute the "if" line first
+    if (lines[0] != NULL) {
+        char *cmd_line = lines[0] + 3; // skip "if "
+        command_t *cmds = parse_pipeline(cmd_line, &status);
+        if (cmds) {
+            execute_pipeline(cmds, status);
+            free_commands(cmds, status);
+            status = WEXITSTATUS(status);
         }
     }
 
-    free(if_cmd);
-    return 1;
+    // Determine whether to execute then/else
+    int start = 1, end = n_lines;
+    int then_start = -1, else_start = -1, fi_index = -1;
+    for (int i = 1; i < n_lines; i++) {
+        if (strncmp(lines[i], "then", 4) == 0) then_start = i+1;
+        if (strncmp(lines[i], "else", 4) == 0) else_start = i+1;
+        if (strncmp(lines[i], "fi", 2) == 0) { fi_index = i; break; }
+    }
+
+    if (status == 0 && then_start != -1) {
+        for (int i = then_start; i < (else_start != -1 ? else_start-1 : fi_index); i++) {
+            command_t *cmds; int ncmds;
+            cmds = parse_pipeline(lines[i], &ncmds);
+            if (cmds) { execute_pipeline(cmds, ncmds); free_commands(cmds, ncmds); }
+        }
+    } else if (status != 0 && else_start != -1) {
+        for (int i = else_start; i < fi_index; i++) {
+            command_t *cmds; int ncmds;
+            cmds = parse_pipeline(lines[i], &ncmds);
+            if (cmds) { execute_pipeline(cmds, ncmds); free_commands(cmds, ncmds); }
+        }
+    }
+
+    return status;
 }
