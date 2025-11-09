@@ -30,3 +30,29 @@ void reap_background_jobs() {
         }
     }
 }
+void shell_loop() {
+    char input[MAX_INPUT_SIZE];
+
+    while (1) {
+        printf("myshell> ");
+        fflush(stdout);
+
+        if (fgets(input, sizeof(input), stdin) == NULL)
+            break; // Ctrl+D exits shell
+
+        // Remove trailing newline
+        input[strcspn(input, "\n")] = 0;
+
+        // Split by ';' for command chaining
+        char *command = strtok(input, ";");
+        while (command != NULL) {
+            trim(command);
+            if (strlen(command) > 0)
+                execute_command(command);
+            command = strtok(NULL, ";");
+        }
+
+        // Clean up finished background jobs
+        reap_background_jobs();
+    }
+}

@@ -6,7 +6,7 @@ int main() {
     ssize_t nread;
 
     init_shell();
-
+    shell_loop();
     while (1) {
         reap_background_jobs();  // Clean finished jobs
         printf("myshell> ");

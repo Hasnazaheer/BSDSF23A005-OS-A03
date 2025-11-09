@@ -14,7 +14,7 @@
 #define MAX_JOBS 100
 #define MAX_CMD_LEN 1024
 #define MAX_ARGS 100
-
+#define MAX_INPUT_SIZE 1024 
 typedef struct {
     pid_t pid;
     char cmd[MAX_CMD_LEN];
@@ -27,5 +27,5 @@ void init_shell();
 void trim(char *str);
 void reap_background_jobs();
 void execute_command(char *cmd_line);
-
+void shell_loop();
 #endif
